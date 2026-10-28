@@ -152,13 +152,7 @@ struct RatioOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let screen = geo.size
-            let screenRatio = screen.width / max(screen.height, 1)
-            let frame: CGSize
-            if screenRatio > ratio.ratioValue {
-                frame = CGSize(width: screen.height * ratio.ratioValue, height: screen.height)
-            } else {
-                frame = CGSize(width: screen.width, height: screen.width / ratio.ratioValue)
-            }
+            let frame = Self.overlayFrame(screen: screen, ratioValue: ratio.ratioValue)
             let x = (screen.width - frame.width) / 2
             let y = (screen.height - frame.height) / 2
             Path { p in
@@ -167,6 +161,14 @@ struct RatioOverlay: View {
             }
             .fill(Color.black.opacity(0.6), style: FillStyle(eoFill: true))
         }
+    }
+
+    static func overlayFrame(screen: CGSize, ratioValue: CGFloat) -> CGSize {
+        let screenRatio = screen.width / max(screen.height, 1)
+        if screenRatio > ratioValue {
+            return CGSize(width: screen.height * ratioValue, height: screen.height)
+        }
+        return CGSize(width: screen.width, height: screen.width / ratioValue)
     }
 }
 

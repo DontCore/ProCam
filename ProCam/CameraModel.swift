@@ -53,7 +53,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var audioInput: AVCaptureDeviceInput?
     private var configuredKey = ""
 
-    private init() {
+    override init() {
         super.init()
         scheduleConfigure()
     }
@@ -74,7 +74,7 @@ final class CameraModel: NSObject, ObservableObject {
                 conn.videoOrientation = orientation
             }
         }
-        DispatchQueue.main.async { self.statusText = "Ориентация: \(orientationLabel(orientation))" }
+        DispatchQueue.main.async { self.statusText = "Ориентация: \(self.orientationLabel(orientation))" }
     }
 
     private func orientationLabel(_ o: AVCaptureVideoOrientation) -> String {
@@ -320,77 +320,69 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
         setStatusMain("Обработка видео…")
         DispatchQueue.main.async { self.isProcessing = true }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result: String
+            guard let self = self else { return }
             let asset = AVURLAsset(url: url)
             guard let track = asset.tracks(withMediaType: .video).first else {
-                result = "В видео нет видеодорожки"
-            } else {
-                let transform = track.preferredTransform
-                let orientedRect = CGRect(origin: .zero, size: track.naturalSize).applying(transform)
-                let oriented = CGSize(width: abs(orientedRect.width), height: abs(orientedRect.height))
-                let target = ratio.cropSize(for: oriented)
+                self.finishProcessing("В видео нет видеодорожки")
+                return
+            }
+            let transform = track.preferredTransform
+            let orientedRect = CGRect(origin: .zero, size: track.naturalSize).applying(transform)
+            let oriented = CGSize(width: abs(orientedRect.width), height: abs(orientedRect.height))
+            let target = ratio.cropSize(for: oriented)
 
-                // 16:9 без поворота — экспорт не нужен, сохраняем как есть
-                let isAlreadyFine = ratio == .r16x9
-                    && abs(oriented.width / oriented.height - 16.0 / 9.0) < 0.01
-                    && abs(transform.b) < 0.01
+            // 16:9 без поворота — экспорт не нужен, сохраняем как есть
+            let isAlreadyFine = ratio == .r16x9
+                && abs(oriented.width / oriented.height - 16.0 / 9.0) < 0.01
+                && abs(transform.b) < 0.01
 
-                if isAlreadyFine {
-                    result = "Экспорт без изменений"
-                    self?.saveToPhotos(url: url) { message in
+            if isAlreadyFine {
+                self.saveToPhotos(url: url) { message in
+                    try? FileManager.default.removeItem(at: url)
+                    self.finishProcessing(message)
+                }
+                return
+            }
+
+            let angle = atan2(transform.b, transform.a)
+            let scale = max(target.width / oriented.width, target.height / oriented.height)
+
+            let composition = AVMutableVideoComposition()
+            composition.renderSize = target
+            composition.frameDuration = CMTime(value: 1, timescale: 60)
+
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+            var matrix = CGAffineTransform(translationX: target.width / 2, y: target.height / 2)
+            matrix = matrix.rotated(by: angle)
+            matrix = matrix.scaledBy(x: scale, y: scale)
+            matrix = matrix.translatedBy(x: -track.naturalSize.width / 2, y: -track.naturalSize.height / 2)
+            layerInstruction.setTransform(matrix, at: .zero)
+            instruction.layerInstructions = [layerInstruction]
+            composition.instructions = [instruction]
+
+            let outUrl = FileManager.default.temporaryDirectory
+                .appendingPathComponent("procam_out_\(Int(Date().timeIntervalSince1970 * 1000)).mov")
+            try? FileManager.default.removeItem(at: outUrl)
+            guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+                self.finishProcessing("Экспорт недоступен")
+                return
+            }
+            export.videoComposition = composition
+            export.outputFileType = .mov
+            export.outputURL = outUrl
+            export.exportAsynchronously {
+                if export.status == .completed {
+                    self.saveToPhotos(url: outUrl) { message in
+                        try? FileManager.default.removeItem(at: outUrl)
                         try? FileManager.default.removeItem(at: url)
-                        self?.finishProcessing(message)
+                        self.finishProcessing(message)
                     }
                 } else {
-                    let angle = atan2(transform.b, transform.a)
-                    let scale = max(target.width / oriented.width, target.height / oriented.height)
-
-                    let composition = AVMutableVideoComposition()
-                    composition.renderSize = target
-                    composition.frameDuration = CMTime(value: 1, timescale: 60)
-
-                    let instruction = AVMutableVideoCompositionInstruction()
-                    instruction.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
-
-                    let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-                    var matrix = CGAffineTransform(translationX: target.width / 2, y: target.height / 2)
-                    matrix = matrix.rotated(by: angle)
-                    matrix = matrix.scaledBy(x: scale, y: scale)
-                    matrix = matrix.translatedBy(x: -track.naturalSize.width / 2, y: -track.naturalSize.height / 2)
-                    layerInstruction.setTransform(matrix, at: .zero)
-                    instruction.layerInstructions = [layerInstruction]
-                    composition.instructions = [instruction]
-
-                    let outUrl = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("procam_out_\(Int(Date().timeIntervalSince1970 * 1000)).mov")
-                    try? FileManager.default.removeItem(at: outUrl)
-                    guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
-                        result = "Экспорт недоступен"
-                    } else {
-                        export.videoComposition = composition
-                        export.outputFileType = .mov
-                        export.outputURL = outUrl
-                        export.exportAsynchronously {
-                            let message: String
-                            if export.status == .completed {
-                                message = "Готово (\(ratio.rawValue))"
-                            } else {
-                                message = "Ошибка экспорта: \(export.error?.localizedDescription ?? "?")"
-                            }
-                            if export.status == .completed {
-                                self?.saveToPhotos(url: outUrl) { saved in
-                                    try? FileManager.default.removeItem(at: outUrl)
-                                    try? FileManager.default.removeItem(at: url)
-                                    self?.finishProcessing(saved)
-                                }
-                            } else {
-                                self?.finishProcessing(message)
-                            }
-                        }
-                        result = "" // завершится в колбэке
-                    }
+                    self.finishProcessing("Ошибка экспорта: \(export.error?.localizedDescription ?? "?")")
                 }
-                if !result.isEmpty { self?.finishProcessing(result) }
             }
         }
     }
